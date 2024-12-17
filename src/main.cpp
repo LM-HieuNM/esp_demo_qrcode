@@ -7,28 +7,22 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 #include "html/web_content.h"
+
 
 const char* ssid = "LUMI_TEST";
 const char* password = "lumivn274!";
 
+// #define USE_WEB_SERVER
+#define USE_MQTT
 #define TAG "QR_CODE"
 /*Set to your screen resolution and rotation*/
 #define TFT_HOR_RES   320
 #define TFT_VER_RES   480
 #define TFT_ROTATION  LV_DISPLAY_ROTATION_0
-
-/*LVGL draw into this buffer, 1/10 screen size usually works well. The size is in bytes*/
 #define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
-// uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 
-uint32_t *draw_buf = NULL;
-lv_display_t * disp = NULL;
-AsyncWebServer server(80);
-bool ledState = false;
-Preferences preferences;
-
-// Struct để lưu thông tin QR
 struct QRCode {
     int id;
     String name;
@@ -37,14 +31,31 @@ struct QRCode {
     String qrText;
 };
 
-// Vector để lưu danh sách QR
+// uint32_t draw_buf[DRAW_BUF_SIZE / 4];
+static uint32_t *draw_buf = NULL;
+lv_display_t * disp = NULL;
+Preferences preferences;
+
+#ifdef USE_WEB_SERVER
+AsyncWebServer server(80);
+bool ledState = false;
+#endif
+
+#ifdef USE_MQTT
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+const char* mqtt_server = "10.10.30.194";  // Hoặc broker của bạn
+const int mqtt_port = 1883;
+const char* mqtt_topic_config = "lumi/qr/config";
+const char* mqtt_topic_status = "lumi/qr/status";
+#endif
+
 std::vector<QRCode> qrList;
 int activeQRId = -1;
-
 // Thêm biến để track ID
 static int nextQRId = 1;  // Thêm ở phần khai báo global
 
-// Hàm helper để lưu QR list vào flash
 void saveQRListToFlash() {
     preferences.begin("qr-storage", false);
     
@@ -63,11 +74,9 @@ void saveQRListToFlash() {
     
     // Lưu active QR ID
     preferences.putInt("active_qr", activeQRId);
-    
     preferences.end();
 }
 
-// Hàm helper để đọc QR list từ flash
 void loadQRListFromFlash() {
     preferences.begin("qr-storage", true);
     
@@ -104,23 +113,6 @@ void loadQRListFromFlash() {
     preferences.end();
 }
 
-void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t * px_map)
-{
-    uint32_t w = (area->x2 - area->x1 + 1);
-    uint32_t h = (area->y2 - area->y1 + 1);
-
-    /*For example ("my_..." functions needs to be implemented by you)
-    uint32_t w = lv_area_get_width(area);
-    uint32_t h = lv_area_get_height(area);
-
-    my_set_window(area->x1, area->y1, w, h);
-    my_draw_bitmaps(px_map, w * h);
-     */
-
-    // Báo cho LVGL biết đã vẽ xong
-    lv_display_flush_ready(disp);
-}
-
 #ifdef LV_USE_QRCODE
 static lv_obj_t * new_screen = NULL;
 static lv_obj_t * qr = NULL;
@@ -130,18 +122,19 @@ static lv_obj_t * account_label = NULL;
 
 void lv_print_qrcode(const char* qr_text, const char* bank_name, const char* name, const char* account)
 {
-    Serial.println(" print_qrcode: " + String(name));
+    Serial.println("----- Print_qrcode: " + String(name));
     
     // Tạo màn hình mới
     if(new_screen == NULL) {
-        // lv_obj_delete(new_screen);
         new_screen = lv_obj_create(NULL);
-        lv_obj_set_style_bg_color(new_screen, lv_color_hex(0x003a57), LV_PART_MAIN);
-        // lv_obj_set_style_bg_color(new_screen, lv_color_white(), LV_PART_MAIN);
+        // lv_obj_set_style_bg_color(new_screen, lv_color_hex(0x003a57), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(new_screen, lv_color_white(), LV_PART_MAIN);
 
         lv_obj_set_style_bg_opa(new_screen, LV_OPA_COVER, LV_PART_MAIN);
     }else {
-        lv_obj_clean(new_screen);
+        Serial.println("----- Clean screen: ");
+        lv_obj_clean(lv_scr_act());
+        Serial.println("----- Clean screen Done ");
     }
 
     // Load màn hình mới
@@ -203,6 +196,7 @@ void lv_print_qrcode(const char* qr_text, const char* bank_name, const char* nam
 }
 #endif
 
+#ifdef USE_WEB_SERVER
 String processor(const String& var) {
     if(var == "LED_STATE") {
         return ledState ? "ON" : "OFF";
@@ -215,7 +209,152 @@ String processor(const String& var) {
     }
     return String();
 }
+#endif
 
+#ifdef USE_MQTT
+void publishQRList() {
+    DynamicJsonDocument doc(8192);
+    doc["activeQRId"] = activeQRId;
+    
+    JsonArray array = doc.createNestedArray("qrList");
+    for(const auto& qr : qrList) {
+        JsonObject obj = array.createNestedObject();
+        obj["id"] = qr.id;
+        obj["name"] = qr.name;
+        obj["account"] = qr.account;
+        obj["bank"] = qr.bank;
+        obj["qrText"] = qr.qrText;
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    Serial.println("publishQRList: " + response);
+    mqttClient.publish(mqtt_topic_status, response.c_str());
+}
+
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+    if (String(topic) == mqtt_topic_config) {
+        DynamicJsonDocument doc(4096);
+        deserializeJson(doc, payload, length);
+        
+        String command = doc["command"].as<String>();
+        
+        if (command == "activate") {
+            int id = doc["id"];
+            auto it = std::find_if(qrList.begin(), qrList.end(),
+                                  [id](const QRCode& qr) { return qr.id == id; });
+            
+            if (it != qrList.end()) {
+                activeQRId = id;
+                saveQRListToFlash();
+                
+                // Phản hồi thành công
+                DynamicJsonDocument responseDoc(256);
+                responseDoc["status"] = "success";
+                responseDoc["message"] = "QR code activated";
+                String response;
+                serializeJson(responseDoc, response);
+                mqttClient.publish(mqtt_topic_status, response.c_str());
+
+                lv_print_qrcode(it->qrText.c_str(), it->bank.c_str(), 
+                                it->name.c_str(), it->account.c_str());
+            } else {
+                // Phản hồi lỗi
+                DynamicJsonDocument responseDoc(256);
+                responseDoc["status"] = "error";
+                responseDoc["message"] = "QR code ID not found";
+                String response;
+                serializeJson(responseDoc, response);
+                mqttClient.publish(mqtt_topic_status, response.c_str());
+            }
+        }
+        else if (command == "add") {
+            QRCode qr;
+            qr.id = nextQRId++;
+            qr.name = doc["name"].as<String>();
+            qr.account = doc["account"].as<String>();
+            qr.bank = doc["bank"].as<String>();
+            qr.qrText = doc["qrText"].as<String>();
+            
+            qrList.push_back(qr);
+            saveQRListToFlash();
+            
+            // Publish updated list
+            publishQRList();
+            
+            // Phản hồi thành công
+            DynamicJsonDocument responseDoc(256);
+            responseDoc["status"] = "success";
+            responseDoc["message"] = "QR code added";
+            String response;
+            serializeJson(responseDoc, response);
+            mqttClient.publish(mqtt_topic_status, response.c_str());
+        }
+        else if (command == "delete") {
+            int idToDelete = doc["id"];
+            auto it = std::find_if(qrList.begin(), qrList.end(),
+                                  [idToDelete](const QRCode& qr) { return qr.id == idToDelete; });
+            
+            if (it != qrList.end()) {
+                if (idToDelete == activeQRId) {
+                    activeQRId = -1;
+                    lv_obj_clean(lv_scr_act());
+                }
+                qrList.erase(it);
+                saveQRListToFlash();
+                publishQRList();
+                
+                // Phản hồi thành công
+                DynamicJsonDocument responseDoc(256);
+                responseDoc["status"] = "success";
+                responseDoc["message"] = "QR code deleted";
+                String response;
+                serializeJson(responseDoc, response);
+                mqttClient.publish(mqtt_topic_status, response.c_str());
+            } else {
+                // Phản hồi lỗi
+                DynamicJsonDocument responseDoc(256);
+                responseDoc["status"] = "error";
+                responseDoc["message"] = "QR code ID not found";
+                String response;
+                serializeJson(responseDoc, response);
+                mqttClient.publish(mqtt_topic_status, response.c_str());
+            }
+        }
+        else if (command == "get_list") {
+            Serial.println("Received get_list command");
+            // Publish the current QR list
+            publishQRList();
+        }
+    }
+}
+
+void mqtt_start(void) {
+    mqttClient.setServer(mqtt_server, mqtt_port);
+    mqttClient.setCallback(mqtt_callback);
+}
+
+void reconnect_mqtt() {
+    while (!mqttClient.connected()) {
+        Serial.print("Attempting MQTT connection to ");
+        Serial.print(mqtt_server);
+        Serial.print("...");
+        
+        String clientId = "ESP32Client-" + String(random(0xffff), HEX);
+        
+        if (mqttClient.connect(clientId.c_str())) {
+            Serial.println("connected");
+            mqttClient.subscribe(mqtt_topic_config);  // Subscribe to the config topic
+            publishQRList();
+        } else {
+            Serial.print("failed, rc=");
+            Serial.print(mqttClient.state());
+            Serial.println(" try again in 5 seconds");
+            delay(5000);
+        }
+    }
+}
+#endif
 void start_ap() {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(ssid, password);
@@ -233,14 +372,13 @@ void start_sta() {
 }
 
 void screen_init() {
-    
     if(disp != NULL) {  
         lv_display_delete(disp);
     }
 
     // Cấp phát bộ nhớ cho draw buffer từ PSRAM
     if(draw_buf == NULL) {
-        draw_buf = (uint32_t *)heap_caps_malloc(DRAW_BUF_SIZE/2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        draw_buf = (uint32_t *)heap_caps_malloc(DRAW_BUF_SIZE/4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     } else {
         ESP_LOGI(TAG, "Allocated draw buffer in PSRAM");
     }
@@ -278,6 +416,11 @@ void setup() {
 
     start_sta();
 
+#ifdef USE_MQTT
+    mqtt_start();
+#endif
+
+#ifdef USE_WEB_SERVER
     // Route cho HTML
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
         if(request!=NULL){
@@ -461,14 +604,19 @@ void setup() {
     });
 
     server.begin();
+#endif
 }
 
 void loop() {
     lv_timer_handler(); /* let the GUI do its work */
-    delay(5); /* let this time pass */
-    // Kiểm tra kết nối WiFi
+    delay(5);
     // if(WiFi.status() != WL_CONNECTED) {
     //     Serial.println("Mất kết nối WiFi! Đang kết nối lại...");
     //     WiFi.reconnect();
     // }
+
+    if (!mqttClient.connected()) {
+        reconnect_mqtt();
+    }
+    mqttClient.loop();
 }
