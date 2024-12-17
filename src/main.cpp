@@ -23,6 +23,7 @@ const char* password = "lumivn274!";
 // uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 
 uint32_t *draw_buf = NULL;
+lv_display_t * disp = NULL;
 AsyncWebServer server(80);
 bool ledState = false;
 Preferences preferences;
@@ -121,12 +122,42 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t * px_map)
 }
 
 #ifdef LV_USE_QRCODE
+static lv_obj_t * new_screen = NULL;
+static lv_obj_t * qr = NULL;
+static lv_obj_t * bank_label = NULL;
+static lv_obj_t * name_label = NULL;
+static lv_obj_t * account_label = NULL;
+
 void lv_print_qrcode(const char* qr_text, const char* bank_name, const char* name, const char* account)
 {
+    Serial.println(" print_qrcode: " + String(name));
+    
+    // Tạo màn hình mới
+    if(new_screen == NULL) {
+        // lv_obj_delete(new_screen);
+        new_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(new_screen, lv_color_hex(0x003a57), LV_PART_MAIN);
+        // lv_obj_set_style_bg_color(new_screen, lv_color_white(), LV_PART_MAIN);
+
+        lv_obj_set_style_bg_opa(new_screen, LV_OPA_COVER, LV_PART_MAIN);
+    }else {
+        lv_obj_clean(new_screen);
+    }
+
+    // Load màn hình mới
+    lv_scr_load(new_screen);
+    
+
     lv_color_t bg_color = lv_palette_lighten(LV_PALETTE_LIGHT_BLUE, 5);
     lv_color_t fg_color = lv_palette_darken(LV_PALETTE_BLUE, 4);
 
-    lv_obj_t * qr = lv_qrcode_create(lv_scr_act());
+    // Tạo QR code trên màn hình mới
+    if(qr != NULL) {
+        lv_obj_delete(qr);
+        Serial.println(" delete qr: ");
+
+    }
+    qr = lv_qrcode_create(lv_scr_act());
     lv_qrcode_set_size(qr, 250);
     lv_qrcode_set_dark_color(qr, fg_color);
     lv_qrcode_set_light_color(qr, bg_color);
@@ -139,29 +170,38 @@ void lv_print_qrcode(const char* qr_text, const char* bank_name, const char* nam
     lv_obj_set_style_border_color(qr, bg_color, 0);
     lv_obj_set_style_border_width(qr, 5, 0);
 
-    // Tạo label cho số tài khoản (giữ nguyên style mặc định)
-    lv_obj_t * bank_label = lv_label_create(lv_scr_act());
+    // Tạo các label trên màn hình mới
+    if(bank_label != NULL) {
+        lv_obj_delete(bank_label);
+        Serial.println(" delete bank_label: ");
+    }
+    bank_label = lv_label_create(lv_scr_act());
     lv_label_set_text(bank_label, bank_name);
     lv_obj_set_style_text_font(bank_label, &lv_font_montserrat_30, 0);
     lv_obj_set_style_text_color(bank_label, lv_color_black(), 0);  
     lv_obj_align_to(bank_label, qr, LV_ALIGN_OUT_TOP_MID, 0, -10);
 
-    // Tạo label cho tên
-    lv_obj_t * name_label = lv_label_create(lv_scr_act());
+    if(name_label != NULL) {
+        lv_obj_delete(name_label);
+        Serial.println(" delete name_label: ");
+    }
+    name_label = lv_label_create(lv_scr_act());
     lv_label_set_text(name_label, name);
     lv_obj_set_style_text_font(name_label, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(name_label, lv_color_black(), 0);            // Màu đen
+    lv_obj_set_style_text_color(name_label, lv_color_black(), 0);
     lv_obj_align_to(name_label, qr, LV_ALIGN_OUT_BOTTOM_MID, 0, 5);
 
-    // Tạo label cho số tài khoản (giữ nguyên style mặc định)
-    lv_obj_t * account_label = lv_label_create(lv_scr_act());
+    if(account_label != NULL) {
+        lv_obj_delete(account_label);
+        Serial.println(" delete account_label: ");
+    }
+    account_label = lv_label_create(lv_scr_act());
     lv_label_set_text(account_label, account);
     lv_obj_set_style_text_font(account_label, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(account_label, lv_color_black(), 0);  
     lv_obj_align_to(account_label, name_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 4);
 }
 #endif
-
 
 String processor(const String& var) {
     if(var == "LED_STATE") {
@@ -192,6 +232,22 @@ void start_sta() {
     Serial.println("\nKết nối WiFi thành công, IP: " + WiFi.localIP().toString());
 }
 
+void screen_init() {
+    
+    if(disp != NULL) {  
+        lv_display_delete(disp);
+    }
+
+    // Cấp phát bộ nhớ cho draw buffer từ PSRAM
+    if(draw_buf == NULL) {
+        draw_buf = (uint32_t *)heap_caps_malloc(DRAW_BUF_SIZE/2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    } else {
+        ESP_LOGI(TAG, "Allocated draw buffer in PSRAM");
+    }
+    disp = lv_tft_espi_create(TFT_HOR_RES, TFT_VER_RES, draw_buf, DRAW_BUF_SIZE/4);
+    lv_display_set_rotation(disp, TFT_ROTATION);
+}
+
 void setup() {
     Serial.begin(115200);
     if(psramInit()){
@@ -206,16 +262,7 @@ void setup() {
     loadQRListFromFlash();
 
     lv_init();
-    lv_display_t * disp;
-    // Cấp phát bộ nhớ cho draw buffer từ PSRAM
-    draw_buf = (uint32_t *)heap_caps_malloc(DRAW_BUF_SIZE/4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(draw_buf == NULL) {
-    } else {
-        ESP_LOGI(TAG, "Allocated draw buffer in PSRAM");
-    }
-    disp = lv_tft_espi_create(TFT_HOR_RES, TFT_VER_RES, draw_buf, DRAW_BUF_SIZE/4);
-    lv_display_set_rotation(disp, TFT_ROTATION);
-
+    screen_init();
     // // In ra thông tin QR
     Serial.print("activeQRId in Flash: ");
     Serial.println(activeQRId);
@@ -343,36 +390,59 @@ void setup() {
         String idStr((char*)data, len);
         int id = idStr.toInt();
         
-        activeQRId = id;
-        saveQRListToFlash();
+        // Tìm QR theo ID thay vì dùng ID làm index
+        auto it = std::find_if(qrList.begin(), qrList.end(),
+                              [id](const QRCode& qr) { return qr.id == id; });
         
-        // TODO: Cập nhật hiển thị QR trên màn hình
-        if(request!=NULL){
+        if (it != qrList.end()) {
+            activeQRId = id;
+            saveQRListToFlash();
             request->send(200, "text/plain", "OK");
+            delay(50);
+            lv_print_qrcode(it->qrText.c_str(), it->bank.c_str(), 
+                            it->name.c_str(), it->account.c_str());
+        } else {
+            request->send(404, "text/plain", "QR not found");
         }
-        delay(50);
-        lv_print_qrcode(qrList[id].qrText.c_str(),qrList[id].bank.c_str(), qrList[id].name.c_str(), qrList[id].account.c_str());
     });
     
     // Xóa QR
     server.on("^\\/qr\\/([0-9]+)$", HTTP_DELETE, [](AsyncWebServerRequest *request){
-        String idStr = request->pathArg(0);
-        int id = idStr.toInt();
-        
-        // Tìm và xóa QR
-        for(auto it = qrList.begin(); it != qrList.end(); ++it) {
-            if(it->id == id) {
-                if(id == activeQRId) {
-                    activeQRId = -1;
+        if (request != NULL) {
+            String idStr = request->pathArg(0);
+            int idToDelete = idStr.toInt();
+            
+            Serial.print("Attempting to delete QR with ID: ");
+            Serial.println(idToDelete);
+
+            // Tìm QR trong danh sách
+            bool found = false;
+            for (size_t i = 0; i < qrList.size(); i++) {
+                if (qrList[i].id == idToDelete) {
+                    // Nếu QR đang active thì clear màn hình
+                    if (idToDelete == activeQRId) {
+                        activeQRId = -1;
+                        lv_obj_clean(lv_scr_act());
+                    }
+                    
+                    // Xóa QR khỏi danh sách
+                    qrList.erase(qrList.begin() + i);
+                    found = true;
+                    
+                    // Lưu thay đổi vào flash
+                    saveQRListToFlash();
+                    
+                    Serial.println("QR deleted successfully");
+                    break;
                 }
-                qrList.erase(it);
-                break;
             }
-        }
-        
-        saveQRListToFlash();
-        if(request!=NULL){
-            request->send(200, "text/plain", "OK");
+            
+            if (found) {
+                request->send(200, "text/plain", "OK");
+            } else {
+                Serial.println("QR not found");
+                request->send(404, "text/plain", "QR không tìm thấy");
+            }
         }
     });
     
@@ -395,7 +465,7 @@ void setup() {
 
 void loop() {
     lv_timer_handler(); /* let the GUI do its work */
-    delay(500); /* let this time pass */
+    delay(5); /* let this time pass */
     // Kiểm tra kết nối WiFi
     // if(WiFi.status() != WL_CONNECTED) {
     //     Serial.println("Mất kết nối WiFi! Đang kết nối lại...");

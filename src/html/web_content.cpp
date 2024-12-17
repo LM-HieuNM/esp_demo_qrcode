@@ -186,8 +186,12 @@ function deleteQR(id) {
     if (confirm('Bạn có chắc muốn xóa QR này?')) {
         const xhr = new XMLHttpRequest();
         xhr.onreadystatechange = function() {
-            if (xhr.readyState == 4 && xhr.status == 200) {
-                refreshQRList();
+            if (xhr.readyState == 4) {
+                if (xhr.status == 200) {
+                    refreshQRList();
+                } else {
+                    alert(`Lỗi khi xóa mã QR: ${xhr.status} - ${xhr.responseText}`);
+                }
             }
         };
         xhr.open("DELETE", `/qr/${id}`, true);
